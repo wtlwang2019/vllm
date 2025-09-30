@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Optional
 import pytest
 
 from vllm import LLM
-from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
 if TYPE_CHECKING:
@@ -97,7 +97,7 @@ def _get_test_sampling_params(
             top_p=0.95,
             n=n,
             seed=seed,
-            guided_decoding=GuidedDecodingParams(
+            structured_outputs=StructuredOutputsParams(
                 regex="[0-9]+") if structured_outputs else None,
         ) for n in n_list
     ], n_list
@@ -213,3 +213,29 @@ def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
         assert len(num_accepted_tokens_per_pos) == 1
         assert isinstance(num_accepted_tokens_per_pos[0], Vector)
         assert len(num_accepted_tokens_per_pos[0].values) == 5
+
+
+@pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])
+def test_skip_tokenizer_initialization(model: str,
+                                       monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+    # This test checks if the flag skip_tokenizer_init skips the initialization
+    # of tokenizer and detokenizer. The generated output is expected to contain
+    # token ids.
+    llm = LLM(
+        model=model,
+        skip_tokenizer_init=True,
+        enforce_eager=True,
+    )
+    sampling_params = SamplingParams(prompt_logprobs=True, detokenize=True)
+
+    with pytest.raises(ValueError, match="cannot pass text prompts when"):
+        llm.generate("abc", sampling_params)
+
+    outputs = llm.generate({"prompt_token_ids": [1, 2, 3]},
+                           sampling_params=sampling_params)
+    assert len(outputs) > 0
+    completions = outputs[0].outputs
+    assert len(completions) > 0
+    assert completions[0].text == ""
+    assert completions[0].token_ids

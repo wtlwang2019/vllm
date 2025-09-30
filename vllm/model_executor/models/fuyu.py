@@ -29,10 +29,9 @@ from transformers import (BatchFeature, FuyuConfig, FuyuImageProcessor,
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -43,8 +42,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
-                    merge_multimodal_embeddings)
+from .utils import AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
@@ -83,8 +81,8 @@ class FuyuProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(FuyuProcessor, **kwargs)
 
-    def get_image_processor(self) -> FuyuImageProcessor:
-        return self.get_hf_processor().image_processor
+    def get_image_processor(self, **kwargs: object) -> FuyuImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": 1}
@@ -226,7 +224,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         bos_token_id = hf_config.bos_token_id
@@ -343,22 +341,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         return self._process_image_input(image_input)
 
-    def get_input_embeddings(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
-    ) -> torch.Tensor:
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if multimodal_embeddings is not None \
-            and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                _IMAGE_TOKEN_ID,
-            )
-        return inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -369,14 +351,6 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ):
         if intermediate_tensors is not None:
             inputs_embeds = None
-
-        # NOTE: In v1, inputs_embeds is always generated at model runner, this
-        # condition is for v0 compatibility.
-        elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
-            input_ids = None
 
         hidden_states = self.language_model(
             input_ids=input_ids,
@@ -389,10 +363,9 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
         logits = self.language_model.logits_processor(
-            self.language_model.lm_head, hidden_states, sampling_metadata)
+            self.language_model.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str,

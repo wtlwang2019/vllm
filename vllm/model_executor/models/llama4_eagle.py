@@ -28,8 +28,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.torchao import TorchAOConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -38,6 +37,7 @@ from vllm.model_executor.models.llama4 import (Llama4DecoderLayer,
                                                Llama4ForCausalLM)
 from vllm.model_executor.models.utils import extract_layer_index
 
+from .interfaces import SupportsMultiModal
 from .utils import AutoWeightsLoader, maybe_prefix
 
 logger = init_logger(__name__)
@@ -67,9 +67,9 @@ class LlamaModel(nn.Module):
 
         self.layers = nn.ModuleList([
             Llama4DecoderLayer(
-                self.config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                config=self.config,
             ) for i in range(self.config.num_hidden_layers)
         ])
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
@@ -78,15 +78,20 @@ class LlamaModel(nn.Module):
         self.norm = RMSNorm(self.config.hidden_size,
                             eps=self.config.rms_norm_eps)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_embeds = self.embed_tokens(input_ids)
+        if inputs_embeds is None:
+            inputs_embeds = self.get_input_embeddings(input_ids)
         hidden_states = self.fc(
-            torch.cat((input_embeds, hidden_states), dim=-1))
+            torch.cat((inputs_embeds, hidden_states), dim=-1))
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
@@ -185,30 +190,34 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
         self.logits_processor = LogitsProcessor(self.config.vocab_size,
                                                 scale=logit_scale)
 
+    def get_language_model(self) -> torch.nn.Module:
+        return self.model
+
+    get_input_embeddings = SupportsMultiModal.get_input_embeddings  # type: ignore
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.model(input_ids, positions, hidden_states)
+        return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> None:
+
+        def transform(inputs):
+            name, loaded_weight = inputs
+            name, weight = self.permute_qk_weight_for_rotary(
+                name, loaded_weight)
+            if "lm_head" not in name:
+                name = "model." + name
+            return name, weight
+
         loader = AutoWeightsLoader(
             self,
             # lm_head is tied with target model (Llama4ForCausalLM)
             skip_prefixes=(["lm_head."]),
         )
-
-        model_weights = {}
-        weights = [
-            self.permute_qk_weight_for_rotary(name, loaded_weight)
-            for name, loaded_weight in weights
-        ]
-        for name, loaded_weight in weights:
-            if "lm_head" not in name:
-                name = "model." + name
-            model_weights[name] = loaded_weight
-
-        loader.load_weights(model_weights.items())
+        loader.load_weights(map(transform, weights))

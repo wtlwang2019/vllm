@@ -22,19 +22,16 @@ TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
 EXPECTED_VALUE = 0.54
-DEFAULT_ARGS = ["--max-model-len", "4096", "--disable-log-requests"]
+DEFAULT_ARGS = ["--max-model-len", "4096"]
 MORE_ARGS_LIST = [
     [],  # Default
     ["--enable-chunked-prefill"],  # Chunked
-    ["--num-scheduler-steps", "8"],  # MS
-    ["--num-scheduler-steps", "8", "--multi-step-stream-outputs"]  # MS+Stream
 ]
 MAX_WAIT_SECONDS = None
 
 if current_platform.is_tpu():
     MORE_ARGS_LIST = [
         [],  # Default
-        # ["--num-scheduler-steps", "8"], # Multi-step << currently fails
     ]
     MAX_WAIT_SECONDS = 600
 
@@ -83,14 +80,4 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch: pytest.MonkeyPatch):
         if current_platform.is_tpu():
             more_args = ["--max-num-seqs", "64"]
 
-        run_test(more_args)
-
-
-@pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
-def test_lm_eval_accuracy_v0_engine(monkeypatch: pytest.MonkeyPatch,
-                                    more_args):
-    """Run with the V0 Engine."""
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "0")
         run_test(more_args)
