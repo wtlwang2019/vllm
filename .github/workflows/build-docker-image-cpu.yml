@@ -119,7 +119,7 @@ jobs:
           target: vllm-openai
           provenance: false
           build-args: |
-            VLLM_CPU_DISABLE_AVX512=false
+            VLLM_CPU_DISABLE_AVX512=true
             VLLM_CPU_AVX512BF16=false
           # using github experimental cache
           # cache-from: type=gha
